@@ -318,6 +318,30 @@ int     zbx_docker_api_detect()
         }
 }
 
+struct inspect_result     zbx_module_docker_parse_json(AGENT_REQUEST *, const char *, int);
+char                     *zbx_module_docker_build_query(const char *prefix, const char *container, const char *suffix)
+{
+        size_t s_size = strlen(prefix) + strlen(container) + strlen(suffix) + 1;
+        char *query = malloc(s_size);
+        zbx_strlcpy(query, prefix, s_size);
+        zbx_strlcat(query, container, s_size);
+        zbx_strlcat(query, suffix, s_size);
+        return query;
+}
+
+int zbx_module_docker_validate_answer(const char *answer, struct inspect_result *iresult)
+{
+        if(strcmp(answer, "") != 0)
+        {
+          return 1;
+        }
+  
+        zabbix_log(LOG_LEVEL_DEBUG, "docker.inspect is not available at the moment - some problem with Docker's socket API");
+        iresult->value = zbx_strdup(NULL, "docker.inspect is not available at the moment - some problem with Docker's socket API");
+        iresult->return_code = SYSINFO_RET_FAIL;
+        return 0;
+}
+
 /******************************************************************************
  *                                                                            *
  * Function: zbx_module_docker_inspect_exec                                   *
@@ -356,31 +380,100 @@ struct inspect_result     zbx_module_docker_inspect_exec(AGENT_REQUEST *request)
             container++;
         }
 
-        size_t s_size = strlen("GET /containers/ /json HTTP/1.0\r\n\n") + strlen(container);
-        query = malloc(s_size);
-        zbx_strlcpy(query, "GET /containers/", s_size);
-        zbx_strlcat(query, container, s_size);
-        zbx_strlcat(query, "/json HTTP/1.0\r\n\n", s_size);
-
+        query = zbx_module_docker_build_query("GET /containers/", container, "/json HTTP/1.0\r\n\n");
         const char *answer = zbx_module_docker_socket_query(query, 0);
         free(query);
-        if(strcmp(answer, "") == 0)
+        
+        if (zbx_module_docker_validate_answer(answer, &iresult) == 0)
         {
-            zabbix_log(LOG_LEVEL_DEBUG, "docker.inspect is not available at the moment - some problem with Docker's socket API");
-            iresult.value = zbx_strdup(NULL, "docker.inspect is not available at the moment - some problem with Docker's socket API");
-            iresult.return_code = SYSINFO_RET_FAIL;
             return iresult;
         }
+        
+        iresult = zbx_module_docker_parse_json(request, answer, 0);
+        
+        if (iresult.return_code == SYSINFO_RET_OK)
+        {
+          return iresult;
+        }
+        
+        zabbix_log(LOG_LEVEL_DEBUG, "Could not find container [%s], will try to find by label", container);
+        // http://localhost/containers/json?filters=\{"label":\["com.docker.compose.service=syncserver"\]\}
+        
+        query = zbx_module_docker_build_query("GET /containers/json?filters={\"label\":[\"", container, "\"]} HTTP/1.0\r\n\n");
+        answer = zbx_module_docker_socket_query(query, 0);
+        free(query);
+        
+        if (zbx_module_docker_validate_answer(answer, &iresult) == 0)
+        {
+            return iresult;
+        }
+        
+        iresult = zbx_module_docker_parse_json(request, answer, 1);
+            
+        if (iresult.return_code == SYSINFO_RET_OK)
+        {
+          return iresult;
+        }
 
-	    struct zbx_json_parse jp_data2;
+        zabbix_log(LOG_LEVEL_DEBUG, "Could not find container [%s], will try to find by name", container);
+        // http://localhost/containers/json?filters=\{"name":\["container_name"\]\}
+    
+        query = zbx_module_docker_build_query("GET /containers/json?filters={\"name\":[\"", container, "\"]} HTTP/1.0\r\n\n");
+        answer = zbx_module_docker_socket_query(query, 0);
+        free(query);
+    
+        if (zbx_module_docker_validate_answer(answer, &iresult) == 0)
+        {
+            return iresult;
+        }
+    
+        return zbx_module_docker_parse_json(request, answer, 1);
+}
+      
+struct inspect_result     zbx_module_docker_parse_json(AGENT_REQUEST *request, const char *answer, int allow_only_one)
+{
+        zabbix_log(LOG_LEVEL_DEBUG, "In zbx_module_docker_parse_json()");
+        struct inspect_result iresult;
+        size_t  s_size;
+
+        struct zbx_json_parse jp_data2;
         char api_value[buffer_size];
 
         struct zbx_json_parse jp_data = {&answer[0], &answer[strlen(answer)]};
 
         if (request->nparam > 1)
         {
-            char *param1;
-            param1 = get_rparam(request, 1);
+          char *param1;
+          param1 = get_rparam(request, 1);
+
+            // try to open an array first
+            if (allow_only_one)
+            {
+              int count = zbx_json_count(&jp_data);
+              
+              if (1 < count)
+              {
+                  free((void*) answer);
+                  zabbix_log(LOG_LEVEL_WARNING, "More than one object returned when searching for just 1 [%s]", param1);
+                  iresult.value = zbx_dsprintf(NULL, "More than one object returned when searching for just 1 [%s]", param1);
+                  iresult.return_code = SYSINFO_RET_FAIL;
+                  return iresult;
+              }
+              else if (1 == count)
+              {
+                // go to first object
+                const char *p2 = zbx_json_next(&jp_data, NULL);
+                // open the next object
+                if (FAIL == zbx_json_brackets_open(p2, &jp_data)) {
+                  free((void*) answer);
+                  zabbix_log(LOG_LEVEL_WARNING, "Could not parse JSON for [%s] in first object", param1);
+                  iresult.value = zbx_dsprintf(NULL, "Could not parse JSON for [%s] in first object", param1);
+                  iresult.return_code = SYSINFO_RET_FAIL;
+                  return iresult;
+                }
+              }
+            }
+            
             // 1st level - plain value search
             if (SUCCEED != zbx_json_value_by_name(&jp_data, param1, api_value, buffer_size))
             {
