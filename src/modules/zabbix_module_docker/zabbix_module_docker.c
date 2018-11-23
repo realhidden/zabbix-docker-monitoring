@@ -146,7 +146,7 @@ ZBX_METRIC      *zbx_module_item_list()
  *        echo -e "GET /containers/json?all=1 HTTP/1.0\r\n" | \               *
  *        nc -U /var/run/docker.sock                                          *
  ******************************************************************************/
-const char*  zbx_module_docker_socket_query(char *query, int stream)
+char*  zbx_module_docker_socket_query(char *query, int stream)
 {
         zabbix_log(LOG_LEVEL_DEBUG, "In zbx_module_docker_socket_query()");
 
@@ -292,7 +292,7 @@ int     zbx_docker_perm()
  *               1 - API detected                                             *
  *                                                                            *
  ******************************************************************************/
-int     zbx_docker_api_detect()
+int zbx_docker_api_detect()
 {
         zabbix_log(LOG_LEVEL_DEBUG, "In zbx_docker_api_detect()");
         // test root or docker permission
@@ -303,23 +303,23 @@ int     zbx_docker_api_detect()
             return socket_api;
         } else {
             // test Docker's socket connection
-            const char *echo = zbx_module_docker_socket_query("GET /_ping HTTP/1.0\r\n\n", 0);
+            char *echo = zbx_module_docker_socket_query("GET /_ping HTTP/1.0\r\n\n", 0);
             if (strcmp(echo, "OK") == 0)
             {
                 zabbix_log(LOG_LEVEL_DEBUG, "Docker's socket works - extended docker metrics are available");
                 socket_api = 1;
+                free(echo);
                 return socket_api;
             } else {
                 zabbix_log(LOG_LEVEL_DEBUG, "Docker's socket doesn't work - only basic docker metrics are available");
                 socket_api = 0;
+                free(echo);
                 return socket_api;
             }
-            free((void*) echo);
         }
 }
 
-struct inspect_result     zbx_module_docker_parse_json(AGENT_REQUEST *, const char *, int);
-char                     *zbx_module_docker_build_query(const char *prefix, const char *container, const char *suffix)
+char *zbx_module_docker_build_query(const char *prefix, const char *container, const char *suffix)
 {
         size_t s_size = strlen(prefix) + strlen(container) + strlen(suffix) + 1;
         char *query = malloc(s_size);
@@ -333,13 +333,182 @@ int zbx_module_docker_validate_answer(const char *answer, struct inspect_result 
 {
         if(strcmp(answer, "") != 0)
         {
-          return 1;
+                return 1;
         }
   
         zabbix_log(LOG_LEVEL_DEBUG, "docker.inspect is not available at the moment - some problem with Docker's socket API");
         iresult->value = zbx_strdup(NULL, "docker.inspect is not available at the moment - some problem with Docker's socket API");
         iresult->return_code = SYSINFO_RET_FAIL;
         return 0;
+}
+
+struct inspect_result zbx_module_docker_parse_json(AGENT_REQUEST *request, const char *answer, int allow_only_one)
+{
+        zabbix_log(LOG_LEVEL_DEBUG, "In zbx_module_docker_parse_json()");
+        struct inspect_result iresult;
+        size_t  s_size;
+
+        struct zbx_json_parse jp_data2;
+        char api_value[buffer_size];
+
+        struct zbx_json_parse jp_data = {&answer[0], &answer[strlen(answer)]};
+
+        if (request->nparam > 1)
+        {
+          char *param1;
+          param1 = get_rparam(request, 1);
+
+            // try to open an array first
+            if (allow_only_one)
+            {
+              int count = zbx_json_count(&jp_data);
+              
+              if (1 < count)
+              {
+                  iresult.value = zbx_dsprintf(NULL, "More than one object returned when searching for just 1 [%s]", param1);
+                  iresult.return_code = SYSINFO_RET_FAIL;
+                  return iresult;
+              }
+              else if (1 == count)
+              {
+                // go to first object
+                const char *p2 = zbx_json_next(&jp_data, NULL);
+                // open the next object
+                if (FAIL == zbx_json_brackets_open(p2, &jp_data)) {
+                  iresult.value = zbx_dsprintf(NULL, "Could not parse JSON for [%s] in first object", param1);
+                  iresult.return_code = SYSINFO_RET_FAIL;
+                  return iresult;
+                }
+              }
+            }
+            
+            // 1st level - plain value search
+            if (SUCCEED != zbx_json_value_by_name(&jp_data, param1, api_value, buffer_size))
+            {
+                // 1st level - json object search
+                if (SUCCEED != zbx_json_brackets_by_name(&jp_data, param1, &jp_data2))
+                {
+                    iresult.value = zbx_dsprintf(NULL, "Cannot find the [%s] item in the received JSON object", param1);
+                    iresult.return_code = SYSINFO_RET_FAIL;
+                    return iresult;
+                } else {
+                    // 2nd level
+                    zabbix_log(LOG_LEVEL_DEBUG, "Item [%s] found in the received JSON object", param1);
+                    if (request->nparam > 2)
+                    {
+                        char *param2, api_value2[buffer_size];
+                        param2 = get_rparam(request, 2);
+                        if (SUCCEED != zbx_json_value_by_name(&jp_data2, param2, api_value2, buffer_size))
+                        {
+                            struct zbx_json_parse jp_data_array;
+                            if (SUCCEED != zbx_json_brackets_by_name(&jp_data2, param2, &jp_data_array))
+                            {
+                                iresult.value = zbx_dsprintf(NULL, "Cannot find the [%s][%s] item in the received JSON object", param1, param2);
+                                iresult.return_code = SYSINFO_RET_FAIL;
+                                return iresult;
+                            } else {
+                                if (request->nparam < 4)
+                                {
+                                    char *values;
+                                    s_size = jp_data_array.end - jp_data_array.start + 2;
+                                    values = malloc(s_size);
+                                    zbx_strlcpy(values, jp_data_array.start, s_size);
+                                    zabbix_log(LOG_LEVEL_DEBUG, "Item [%s][%s] found in the received JSON object: %s", param1, param2, values);
+                                    iresult.value = zbx_strdup(NULL, values);
+                                    iresult.return_code = SYSINFO_RET_OK;
+                                    free((void*) values);
+                                    return iresult;
+                                } else {
+                                    // find item in array - selector is param3
+    	                            const char	*p_array = NULL;
+                                    char *result_array, *value, *selector, *string, *tofree;
+                                    while (NULL != (p_array = zbx_json_next(&jp_data_array, p_array)))
+   	                                {
+                                       if ((result_array = strchr(p_array+1, '"')) != NULL)
+                                       {
+                                           s_size = strlen(p_array+1) - strlen(result_array) + 1;
+                                           value = malloc(s_size);
+                                           zbx_strlcpy(value, p_array+1, s_size);
+                                           zabbix_log(LOG_LEVEL_DEBUG, "Array item: %s", value);
+
+                                           char	  *arg4 = get_rparam(request, 3) ?: "";
+                                           tofree = string = strdup(arg4);
+
+                                           // hacking: Marathon MESOS_TASK_ID, Chronos - mesos_task_id
+                                           // docker.inspect[cid,Config,Env,MESOS_TASK_ID=|mesos_task_id=]
+                                           while ((selector = strsep(&string, "|")) != NULL) {
+                                               // if start of value match with array selector return without selector
+                                               if (strncmp(value, selector, strlen(selector)) == 0)
+                                               {
+                                                    // remove selector from returned value
+                                                    value += strlen(selector);
+
+                                                    zabbix_log(LOG_LEVEL_DEBUG, "Item [%s][%s][%s] found in the received JSON object: %s", param1, param2, selector, value);
+                                                    iresult.value = zbx_strdup(NULL, value);
+                                                    iresult.return_code = SYSINFO_RET_OK;
+                                                    value -= strlen(selector);
+                                                    free((void*) value);
+                                                    free((void*) tofree);
+                                                    return iresult;
+                                               }
+                                           }
+                                           free(tofree);
+                                       } else {
+                                           free((void*) value);
+                                           iresult.value = zbx_dsprintf(NULL, "Cannot find the [%s][%s][%s] item in the received JSON object (non standard JSON array)", param1, param2, get_rparam(request, 3));
+                                           iresult.return_code = SYSINFO_RET_FAIL;
+                                           return iresult;
+                                       }
+                                    }
+                                    free((void*) value);
+                                    iresult.value = zbx_dsprintf(NULL, "Cannot find the [%s][%s][%s] item in the received JSON object (selector - param3 doesn't match any value)", param1, param2, get_rparam(request, 3));
+                                    iresult.return_code = SYSINFO_RET_FAIL;
+                                    return iresult;
+                                 }
+                            }
+                        } else {
+                            // 3rd level
+                            zabbix_log(LOG_LEVEL_DEBUG, "Item [%s][%s] found in the received JSON object", param1, param2);
+                            if (request->nparam > 3)
+                            {
+                               char *param3, api_value3[buffer_size];
+                               param3 = get_rparam(request, 3);
+                               struct zbx_json_parse jp_data3 = {&api_value2[0], &api_value2[strlen(api_value2)]};
+                               if (SUCCEED != zbx_json_value_by_name(&jp_data3, param3, api_value3, buffer_size))
+                               {
+                                    iresult.value = zbx_dsprintf(NULL, "Cannot find the [%s][%s][%s] item in the received JSON object", param1, param2, param3);
+                                    iresult.return_code = SYSINFO_RET_FAIL;
+                                    return iresult;
+                                } else {
+                                    zabbix_log(LOG_LEVEL_DEBUG, "Item [%s][%s][%s] found in the received JSON object: %s", param1, param2, param3, api_value3);
+                                    iresult.value = zbx_strdup(NULL, api_value3);
+                                    iresult.return_code = SYSINFO_RET_OK;
+                                    return iresult;
+                                }
+                            } else {
+                                zabbix_log(LOG_LEVEL_DEBUG, "Item [%s][%s] found in the received JSON object: %s", param1, param2, api_value2);
+                                iresult.value = zbx_strdup(NULL, api_value2);
+                                iresult.return_code = SYSINFO_RET_OK;
+                                return iresult;
+                            }
+                        }
+                    } else {
+                        zabbix_log(LOG_LEVEL_WARNING, "Item [%s] found in the received JSON object, but it's not plain value object", param1);
+                        iresult.value = zbx_dsprintf(NULL, "Can find the [%s] item in the received JSON object, but it's not plain value object", param1);
+                        iresult.return_code = SYSINFO_RET_FAIL;
+                        return iresult;
+                    }
+                }
+            } else {
+                zabbix_log(LOG_LEVEL_DEBUG, "Item [%s] found in the received JSON object: %s", param1, api_value);
+                iresult.value = zbx_strdup(NULL, api_value);
+                iresult.return_code = SYSINFO_RET_OK;
+                return iresult;
+            }
+        }
+        iresult.value = zbx_strdup(NULL, "");
+        iresult.return_code = SYSINFO_RET_OK;
+        return iresult;
 }
 
 /******************************************************************************
@@ -380,24 +549,31 @@ struct inspect_result     zbx_module_docker_inspect_exec(AGENT_REQUEST *request)
             container++;
         }
 
+        // container id
+        
         query = zbx_module_docker_build_query("GET /containers/", container, "/json HTTP/1.0\r\n\n");
-        const char *answer = zbx_module_docker_socket_query(query, 0);
+        char *answer = zbx_module_docker_socket_query(query, 0);
         free(query);
         
         if (zbx_module_docker_validate_answer(answer, &iresult) == 0)
         {
+            free(answer);
             return iresult;
         }
         
         iresult = zbx_module_docker_parse_json(request, answer, 0);
+        free(answer);
         
         if (iresult.return_code == SYSINFO_RET_OK)
         {
-          return iresult;
+            return iresult;
         }
-        
+
+        // find by label
+
+        zabbix_log(LOG_LEVEL_DEBUG, "%s", iresult.value);
+        zbx_free(iresult.value);
         zabbix_log(LOG_LEVEL_DEBUG, "Could not find container [%s], will try to find by label", container);
-        // http://localhost/containers/json?filters=\{"label":\["com.docker.compose.service=syncserver"\]\}
         
         query = zbx_module_docker_build_query("GET /containers/json?filters={\"label\":[\"", container, "\"]} HTTP/1.0\r\n\n");
         answer = zbx_module_docker_socket_query(query, 0);
@@ -405,18 +581,23 @@ struct inspect_result     zbx_module_docker_inspect_exec(AGENT_REQUEST *request)
         
         if (zbx_module_docker_validate_answer(answer, &iresult) == 0)
         {
+            free(answer);
             return iresult;
         }
         
         iresult = zbx_module_docker_parse_json(request, answer, 1);
-            
+        free(answer);
+
         if (iresult.return_code == SYSINFO_RET_OK)
         {
-          return iresult;
+            return iresult;
         }
 
+        // find by name
+
+        zabbix_log(LOG_LEVEL_DEBUG, "%s", iresult.value);
+        zbx_free(iresult.value);
         zabbix_log(LOG_LEVEL_DEBUG, "Could not find container [%s], will try to find by name", container);
-        // http://localhost/containers/json?filters=\{"name":\["container_name"\]\}
     
         query = zbx_module_docker_build_query("GET /containers/json?filters={\"name\":[\"", container, "\"]} HTTP/1.0\r\n\n");
         answer = zbx_module_docker_socket_query(query, 0);
@@ -424,199 +605,18 @@ struct inspect_result     zbx_module_docker_inspect_exec(AGENT_REQUEST *request)
     
         if (zbx_module_docker_validate_answer(answer, &iresult) == 0)
         {
+            free(answer);
             return iresult;
         }
     
-        return zbx_module_docker_parse_json(request, answer, 1);
-}
-      
-struct inspect_result     zbx_module_docker_parse_json(AGENT_REQUEST *request, const char *answer, int allow_only_one)
-{
-        zabbix_log(LOG_LEVEL_DEBUG, "In zbx_module_docker_parse_json()");
-        struct inspect_result iresult;
-        size_t  s_size;
-
-        struct zbx_json_parse jp_data2;
-        char api_value[buffer_size];
-
-        struct zbx_json_parse jp_data = {&answer[0], &answer[strlen(answer)]};
-
-        if (request->nparam > 1)
+        iresult = zbx_module_docker_parse_json(request, answer, 1);
+        free(answer);
+        
+        if (iresult.return_code == SYSINFO_RET_FAIL)
         {
-          char *param1;
-          param1 = get_rparam(request, 1);
-
-            // try to open an array first
-            if (allow_only_one)
-            {
-              int count = zbx_json_count(&jp_data);
-              
-              if (1 < count)
-              {
-                  free((void*) answer);
-                  zabbix_log(LOG_LEVEL_WARNING, "More than one object returned when searching for just 1 [%s]", param1);
-                  iresult.value = zbx_dsprintf(NULL, "More than one object returned when searching for just 1 [%s]", param1);
-                  iresult.return_code = SYSINFO_RET_FAIL;
-                  return iresult;
-              }
-              else if (1 == count)
-              {
-                // go to first object
-                const char *p2 = zbx_json_next(&jp_data, NULL);
-                // open the next object
-                if (FAIL == zbx_json_brackets_open(p2, &jp_data)) {
-                  free((void*) answer);
-                  zabbix_log(LOG_LEVEL_WARNING, "Could not parse JSON for [%s] in first object", param1);
-                  iresult.value = zbx_dsprintf(NULL, "Could not parse JSON for [%s] in first object", param1);
-                  iresult.return_code = SYSINFO_RET_FAIL;
-                  return iresult;
-                }
-              }
-            }
-            
-            // 1st level - plain value search
-            if (SUCCEED != zbx_json_value_by_name(&jp_data, param1, api_value, buffer_size))
-            {
-                // 1st level - json object search
-                if (SUCCEED != zbx_json_brackets_by_name(&jp_data, param1, &jp_data2))
-                {
-                    free((void*) answer);
-                    zabbix_log(LOG_LEVEL_WARNING, "Cannot find the [%s] item in the received JSON object", param1);
-                    iresult.value = zbx_dsprintf(NULL, "Cannot find the [%s] item in the received JSON object", param1);
-                    iresult.return_code = SYSINFO_RET_FAIL;
-                    return iresult;
-                } else {
-                    // 2nd level
-                    zabbix_log(LOG_LEVEL_DEBUG, "Item [%s] found in the received JSON object", param1);
-                    if (request->nparam > 2)
-                    {
-                        char *param2, api_value2[buffer_size];
-                        param2 = get_rparam(request, 2);
-                        if (SUCCEED != zbx_json_value_by_name(&jp_data2, param2, api_value2, buffer_size))
-                        {
-                            struct zbx_json_parse jp_data_array;
-                            if (SUCCEED != zbx_json_brackets_by_name(&jp_data2, param2, &jp_data_array))
-                            {
-                                free((void*) answer);
-                                zabbix_log(LOG_LEVEL_WARNING, "Cannot find the [%s][%s] item in the received JSON object", param1, param2);
-                                iresult.value = zbx_dsprintf(NULL, "Cannot find the [%s][%s] item in the received JSON object", param1, param2);
-                                iresult.return_code = SYSINFO_RET_FAIL;
-                                return iresult;
-                            } else {
-                                if (request->nparam < 4)
-                                {
-                                    free((void*) answer);
-                                    char *values;
-                                    s_size = jp_data_array.end - jp_data_array.start + 2;
-                                    values = malloc(s_size);
-                                    zbx_strlcpy(values, jp_data_array.start, s_size);
-                                    zabbix_log(LOG_LEVEL_DEBUG, "Item [%s][%s] found in the received JSON object: %s", param1, param2, values);
-                                    iresult.value = zbx_strdup(NULL, values);
-                                    iresult.return_code = SYSINFO_RET_OK;
-                                    free((void*) values);
-                                    return iresult;
-                                } else {
-                                    // find item in array - selector is param3
-    	                            const char	*p_array = NULL;
-                                    char *result_array, *value, *selector, *string, *tofree;
-                                    while (NULL != (p_array = zbx_json_next(&jp_data_array, p_array)))
-   	                                {
-                                       if ((result_array = strchr(p_array+1, '"')) != NULL)
-                                       {
-                                           s_size = strlen(p_array+1) - strlen(result_array) + 1;
-                                           value = malloc(s_size);
-                                           zbx_strlcpy(value, p_array+1, s_size);
-                                           zabbix_log(LOG_LEVEL_DEBUG, "Array item: %s", value);
-
-                                           char	  *arg4 = get_rparam(request, 3);
-                                           tofree = string = strdup(arg4);
-
-                                           // hacking: Marathon MESOS_TASK_ID, Chronos - mesos_task_id
-                                           // docker.inspect[cid,Config,Env,MESOS_TASK_ID=|mesos_task_id=]
-                                           while ((selector = strsep(&string, "|")) != NULL) {
-                                               // if start of value match with array selector return without selector
-                                               if (strncmp(value, selector, strlen(selector)) == 0)
-                                               {
-                                                    // remove selector from returned value
-                                                    value += strlen(selector);
-
-                                                    zabbix_log(LOG_LEVEL_DEBUG, "Item [%s][%s][%s] found in the received JSON object: %s", param1, param2, selector, value);
-                                                    iresult.value = zbx_strdup(NULL, value);
-                                                    iresult.return_code = SYSINFO_RET_OK;
-                                                    value -= strlen(selector);
-                                                    free((void*) value);
-                                                    free((void*) answer);
-                                                    free((void*) tofree);
-                                                    return iresult;
-                                               }
-                                           }
-                                           free(tofree);
-                                       } else {
-                                           free((void*) value);
-                                           free((void*) answer);
-                                           zabbix_log(LOG_LEVEL_WARNING, "Cannot find the [%s][%s][%s] item in the received JSON object (non standard JSON array)", param1, param2, get_rparam(request, 3));
-                                           iresult.value = zbx_dsprintf(NULL, "Cannot find the [%s][%s][%s] item in the received JSON object (non standard JSON array)", param1, param2, get_rparam(request, 3));
-                                           iresult.return_code = SYSINFO_RET_FAIL;
-                                           return iresult;
-                                       }
-                                    }
-                                    free((void*) value);
-                                    free((void*) answer);
-                                    zabbix_log(LOG_LEVEL_WARNING, "Cannot find the [%s][%s][%s] item in the received JSON object (selector - param3 doesn't match any value)", param1, param2, get_rparam(request, 3));
-                                    iresult.value = zbx_dsprintf(NULL, "Cannot find the [%s][%s][%s] item in the received JSON object (selector - param3 doesn't match any value)", param1, param2, get_rparam(request, 3));
-                                    iresult.return_code = SYSINFO_RET_FAIL;
-                                    return iresult;
-                                 }
-                            }
-                        } else {
-                            // 3rd level
-                            zabbix_log(LOG_LEVEL_DEBUG, "Item [%s][%s] found in the received JSON object", param1, param2);
-                            if (request->nparam > 3)
-                            {
-                               char *param3, api_value3[buffer_size];
-                               param3 = get_rparam(request, 3);
-                               struct zbx_json_parse jp_data3 = {&api_value2[0], &api_value2[strlen(api_value2)]};
-                               if (SUCCEED != zbx_json_value_by_name(&jp_data3, param3, api_value3, buffer_size))
-                               {
-                                    free((void*) answer);
-                                    zabbix_log(LOG_LEVEL_WARNING, "Cannot find the [%s][%s][%s] item in the received JSON object", param1, param2, param3);
-                                    iresult.value = zbx_dsprintf(NULL, "Cannot find the [%s][%s][%s] item in the received JSON object", param1, param2, param3);
-                                    iresult.return_code = SYSINFO_RET_FAIL;
-                                    return iresult;
-                                } else {
-                                    free((void*) answer);
-                                    zabbix_log(LOG_LEVEL_DEBUG, "Item [%s][%s][%s] found in the received JSON object: %s", param1, param2, param3, api_value3);
-                                    iresult.value = zbx_strdup(NULL, api_value3);
-                                    iresult.return_code = SYSINFO_RET_OK;
-                                    return iresult;
-                                }
-                            } else {
-                                free((void*) answer);
-                                zabbix_log(LOG_LEVEL_DEBUG, "Item [%s][%s] found in the received JSON object: %s", param1, param2, api_value2);
-                                iresult.value = zbx_strdup(NULL, api_value2);
-                                iresult.return_code = SYSINFO_RET_OK;
-                                return iresult;
-                            }
-                        }
-                    } else {
-                        free((void*) answer);
-                        zabbix_log(LOG_LEVEL_WARNING, "Item [%s] found in the received JSON object, but it's not plain value object", param1);
-                        iresult.value = zbx_dsprintf(NULL, "Can find the [%s] item in the received JSON object, but it's not plain value object", param1);
-                        iresult.return_code = SYSINFO_RET_FAIL;
-                        return iresult;
-                    }
-                }
-            } else {
-                free((void*) answer);
-                zabbix_log(LOG_LEVEL_DEBUG, "Item [%s] found in the received JSON object: %s", param1, api_value);
-                iresult.value = zbx_strdup(NULL, api_value);
-                iresult.return_code = SYSINFO_RET_OK;
-                return iresult;
-            }
+            zabbix_log(LOG_LEVEL_WARNING, "%s", iresult.value);
         }
-        free((void*) answer);
-        iresult.value = zbx_strdup(NULL, "");
-        iresult.return_code = SYSINFO_RET_OK;
+        
         return iresult;
 }
 
@@ -978,10 +978,12 @@ int     zbx_module_docker_dev(AGENT_REQUEST *request, AGENT_RESULT *result)
         }
 
         container = zbx_module_docker_get_fci(get_rparam(request, 0));
+
         char    *arg2 = get_rparam(request, 1);
-        char    *stat_file = malloc(strlen(arg2) + 2);
-        zbx_strlcpy(stat_file, "/", strlen(arg2) + 2);
-        zbx_strlcat(stat_file, get_rparam(request, 1), strlen(arg2) + 2);
+        size_t  size = strlen(arg2 ?: "") + 2;
+        char    *stat_file = malloc(size);
+        zbx_strlcpy(stat_file, "/", size);
+        zbx_strlcat(stat_file, get_rparam(request, 1), size);
         metric = get_rparam(request, 2);
 
         char    *cgroup = "blkio/";
@@ -1448,7 +1450,7 @@ int     zbx_module_docker_net(AGENT_REQUEST *request, AGENT_RESULT *result)
         free(netns);
         if (fp == NULL)
         {
-            zabbix_log(LOG_LEVEL_WARNING, "Cannot execute netns command");
+            zabbix_log(LOG_LEVEL_WARNING, "Cannot execute netns command: %s", zbx_strerror(errno));
             SET_MSG_RESULT(result, zbx_strdup(NULL, "Cannot execute netns command"));
             return SYSINFO_RET_FAIL;
         }
@@ -1788,7 +1790,7 @@ int     zbx_module_docker_discovery_extended(AGENT_REQUEST *request, AGENT_RESUL
         zabbix_log(LOG_LEVEL_DEBUG, "In zbx_module_docker_discovery_extended()");
 
         struct zbx_json j;
-        const char *answer = zbx_module_docker_socket_query("GET /containers/json?all=0 HTTP/1.0\r\n\n", 0);
+        char *answer = zbx_module_docker_socket_query("GET /containers/json?all=0 HTTP/1.0\r\n\n", 0);
         if(strcmp(answer, "") == 0)
         {
             zabbix_log(LOG_LEVEL_DEBUG, "docker.discovery is not available at the moment - some problem with Docker's socket API");
@@ -1797,6 +1799,7 @@ int     zbx_module_docker_discovery_extended(AGENT_REQUEST *request, AGENT_RESUL
             zbx_json_close(&j);
             SET_STR_RESULT(result, zbx_strdup(NULL, j.buffer));
             zbx_json_free(&j);
+            free(answer);
             return SYSINFO_RET_FAIL;
         }
 
@@ -1808,7 +1811,7 @@ int     zbx_module_docker_discovery_extended(AGENT_REQUEST *request, AGENT_RESUL
             zbx_json_close(&j);
             SET_STR_RESULT(result, zbx_strdup(NULL, j.buffer));
             zbx_json_free(&j);
-            free((void*) answer);
+            free(answer);
             return SYSINFO_RET_OK;
         }
 
@@ -1978,7 +1981,7 @@ int     zbx_module_docker_discovery_extended(AGENT_REQUEST *request, AGENT_RESUL
         zbx_json_close(&j);
         SET_STR_RESULT(result, zbx_strdup(NULL, j.buffer));
         zbx_json_free(&j);
-        free((void*) answer);
+        free(answer);
 
         return SYSINFO_RET_OK;
 }
@@ -2035,11 +2038,12 @@ int     zbx_module_docker_info(AGENT_REQUEST *request, AGENT_RESULT *result)
 
         char    *info;
         info = get_rparam(request, 0);
-        const char *answer = zbx_module_docker_socket_query("GET /info HTTP/1.0\r\n\n", 0);
+        char *answer = zbx_module_docker_socket_query("GET /info HTTP/1.0\r\n\n", 0);
         if(strcmp(answer, "") == 0)
         {
             zabbix_log(LOG_LEVEL_DEBUG, "docker.info is not available at the moment - some problem with Docker's socket API");
             SET_MSG_RESULT(result, strdup("docker.info is not available at the moment - some problem with Docker's socket API"));
+            free(answer);
             return SYSINFO_RET_FAIL;
         }
 
@@ -2049,12 +2053,12 @@ int     zbx_module_docker_info(AGENT_REQUEST *request, AGENT_RESULT *result)
         {
             zabbix_log(LOG_LEVEL_WARNING, "Cannot find the [%s] item in the received JSON object", info);
             SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot find the [%s] item in the received JSON object", info));
-            free((void*) answer);
+            free(answer);
             return SYSINFO_RET_FAIL;
         } else {
             zabbix_log(LOG_LEVEL_DEBUG, "Item [%s] found in the received JSON object: %s", info, api_value);
             SET_STR_RESULT(result, zbx_strdup(NULL, api_value));
-            free((void*) answer);
+            free(answer);
             return SYSINFO_RET_OK;
         }
 }
@@ -2103,12 +2107,13 @@ int     zbx_module_docker_stats(AGENT_REQUEST *request, AGENT_RESULT *result)
         zbx_strlcat(query, container, s_size);
         zbx_strlcat(query, "/stats HTTP/1.0\r\n\n", s_size);
         // stats output is stream
-        const char *answer = zbx_module_docker_socket_query(query, 1);
+        char *answer = zbx_module_docker_socket_query(query, 1);
         free(query);
         if(strcmp(answer, "") == 0)
         {
             zabbix_log(LOG_LEVEL_DEBUG, "docker.stats is not available at the moment - some problem with Docker's socket API");
             SET_MSG_RESULT(result, strdup("docker.stats is not available at the moment - some problem with Docker's socket API"));
+            free(answer);
             return SYSINFO_RET_FAIL;
         }
 
@@ -2129,7 +2134,7 @@ int     zbx_module_docker_stats(AGENT_REQUEST *request, AGENT_RESULT *result)
                 {
                     zabbix_log(LOG_LEVEL_WARNING, "Cannot find the [%s] item in the received JSON object", param1);
                     SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot find the [%s] item in the received JSON object", param1));
-                    free((void*) answer);
+                    free(answer);
                     return SYSINFO_RET_FAIL;
                 } else {
                     // 2nd level
@@ -2144,7 +2149,7 @@ int     zbx_module_docker_stats(AGENT_REQUEST *request, AGENT_RESULT *result)
                             {
                                 zabbix_log(LOG_LEVEL_WARNING, "Cannot find the [%s][%s] item in the received JSON object", param1, param2);
                                 SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot find the [%s][%s] item in the received JSON object", param1, param2));
-                                free((void*) answer);
+                                free(answer);
                                 return SYSINFO_RET_FAIL;
                             } else {
                                 // 3rd level
@@ -2156,42 +2161,42 @@ int     zbx_module_docker_stats(AGENT_REQUEST *request, AGENT_RESULT *result)
                                     {
                                         zabbix_log(LOG_LEVEL_WARNING, "Cannot find the [%s][%s][%s] item in the received JSON object", param1, param2, param3);
                                         SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Cannot find the [%s][%s][%s] item in the received JSON object", param1, param2, param3));
-                                        free((void*) answer);
+                                        free(answer);
                                         return SYSINFO_RET_FAIL;
                                     } else {
                                         zabbix_log(LOG_LEVEL_DEBUG, "Item [%s][%s][%s] found in the received JSON object: %s", param1, param2, param3, api_value3);
                                         SET_STR_RESULT(result, zbx_strdup(NULL, api_value3));
-                                        free((void*) answer);
+                                        free(answer);
                                         return SYSINFO_RET_OK;
                                     }
                                 } else {
                                     zabbix_log(LOG_LEVEL_DEBUG, "Item [%s][%s] found the received JSON object: %s", param1, param2, api_value2);
                                     SET_STR_RESULT(result, zbx_strdup(NULL, api_value2));
-                                    free((void*) answer);
+                                    free(answer);
                                     return SYSINFO_RET_OK;
                                 }
                             }
                         } else {
                             zabbix_log(LOG_LEVEL_DEBUG, "Item [%s][%s] found in the received JSON object: %s", param1, param2, api_value2);
                             SET_STR_RESULT(result, zbx_strdup(NULL, api_value2));
-                            free((void*) answer);
+                            free(answer);
                             return SYSINFO_RET_OK;
                         }
                     } else {
                         zabbix_log(LOG_LEVEL_WARNING, "Item [%s] found in the received JSON object, but it's not plain value object", param1);
                         SET_MSG_RESULT(result, zbx_dsprintf(NULL, "Item [%s] found in the received JSON object, but it's not plain value object", param1));
-                        free((void*) answer);
+                        free(answer);
                         return SYSINFO_RET_FAIL;
                     }
                 }
             } else {
                     zabbix_log(LOG_LEVEL_DEBUG, "Item [%s] found in the received JSON object: %s", param1, api_value);
                     SET_STR_RESULT(result, zbx_strdup(NULL, api_value));
-                    free((void*) answer);
+                    free(answer);
                     return SYSINFO_RET_OK;
             }
         }
-        free((void*) answer);
+        free(answer);
         return SYSINFO_RET_OK;
 }
 
@@ -2231,15 +2236,17 @@ int     zbx_module_docker_cstatus(AGENT_REQUEST *request, AGENT_RESULT *result)
         if (strcmp(state, "Up") == 0)
         {
             // Up
-            const char *answer = zbx_module_docker_socket_query("GET /containers/json?all=0 HTTP/1.0\r\n\n", 0);
+            char *answer = zbx_module_docker_socket_query("GET /containers/json?all=0 HTTP/1.0\r\n\n", 0);
             int count = 0;
 
             if(strcmp(answer, "") == 0)
             {
                 zabbix_log(LOG_LEVEL_DEBUG, "docker.cstatus is not available at the moment - some problem with Docker's socket API");
                 SET_MSG_RESULT(result, strdup("docker.cstatus is not available at the moment - some problem with Docker's socket API"));
+                free(answer);
                 return SYSINFO_RET_FAIL;
             }
+
             if(strcmp(answer, "[]\n") != 0)
             {
                 struct zbx_json_parse	jp_data;
@@ -2247,7 +2254,8 @@ int     zbx_module_docker_cstatus(AGENT_REQUEST *request, AGENT_RESULT *result)
                 jp_data.end = &answer[strlen(answer)];
                 count = zbx_json_count(&jp_data);
             }
-            free((void*) answer);
+            
+            free(answer);
             zabbix_log(LOG_LEVEL_DEBUG, "Count of containers in %s status: %d", state, count);
             SET_UI64_RESULT(result, count);
             return SYSINFO_RET_OK;
@@ -2257,7 +2265,7 @@ int     zbx_module_docker_cstatus(AGENT_REQUEST *request, AGENT_RESULT *result)
             {
                 // Exited = All - Up
                 // # All
-                const char *answer = zbx_module_docker_socket_query("GET /containers/json?all=1 HTTP/1.0\r\n\n", 0);
+                char *answer = zbx_module_docker_socket_query("GET /containers/json?all=1 HTTP/1.0\r\n\n", 0);
                 struct zbx_json_parse	jp_data;
                 int count = 0;
 
@@ -2265,6 +2273,7 @@ int     zbx_module_docker_cstatus(AGENT_REQUEST *request, AGENT_RESULT *result)
                 {
                     zabbix_log(LOG_LEVEL_DEBUG, "docker.cstatus is not available at the moment - some problem with Docker's socket API");
                     SET_MSG_RESULT(result, strdup("docker.cstatus is not available at the moment - some problem with Docker's socket API"));
+                    free(answer);
                     return SYSINFO_RET_FAIL;
                 }
                 if(strcmp(answer, "[]\n") != 0)
@@ -2273,14 +2282,15 @@ int     zbx_module_docker_cstatus(AGENT_REQUEST *request, AGENT_RESULT *result)
                     jp_data.end = &answer[strlen(answer)];
                     count = zbx_json_count(&jp_data);
                 }
-                free((void*) answer);
+                free(answer);
 
                 // # Up
-                const char *answer2 = zbx_module_docker_socket_query("GET /containers/json?all=0 HTTP/1.0\r\n\n", 0);
+                char *answer2 = zbx_module_docker_socket_query("GET /containers/json?all=0 HTTP/1.0\r\n\n", 0);
                 if(strcmp(answer2, "") == 0)
                 {
                     zabbix_log(LOG_LEVEL_DEBUG, "docker.cstatus is not available at the moment - some problem with Docker's socket API");
                     SET_MSG_RESULT(result, strdup("docker.cstatus is not available at the moment - some problem with Docker's socket API"));
+                    free(answer2);
                     return SYSINFO_RET_FAIL;
                 }
                 if(strcmp(answer2, "[]\n") != 0)
@@ -2289,7 +2299,7 @@ int     zbx_module_docker_cstatus(AGENT_REQUEST *request, AGENT_RESULT *result)
                     jp_data.end = &answer2[strlen(answer2)];
                     count = count - zbx_json_count(&jp_data);
                 }
-                free((void*) answer2);
+                free(answer2);
                 zabbix_log(LOG_LEVEL_DEBUG, "Count of containers in %s status: %d", state, count);
                 SET_UI64_RESULT(result, count);
                 return SYSINFO_RET_OK;
@@ -2298,18 +2308,19 @@ int     zbx_module_docker_cstatus(AGENT_REQUEST *request, AGENT_RESULT *result)
                 {
                     // Crashed - parsing Exited (x) x!=0
                     // # All
-                    const char *answer = zbx_module_docker_socket_query("GET /containers/json?all=1 HTTP/1.0\r\n\n", 0);
+                    char *answer = zbx_module_docker_socket_query("GET /containers/json?all=1 HTTP/1.0\r\n\n", 0);
                     if(strcmp(answer, "") == 0)
                     {
                         zabbix_log(LOG_LEVEL_DEBUG, "docker.cstatus is not available at the moment - some problem with Docker's socket API");
                         SET_MSG_RESULT(result, strdup("docker.cstatus is not available at the moment - some problem with Docker's socket API"));
+                        free(answer);
                         return SYSINFO_RET_FAIL;
                     }
 
                     // empty reponse
                     if (strcmp(answer, "[]\n") == 0) {
                        SET_UI64_RESULT(result, 0);
-                       free((void*) answer);
+                       free(answer);
                        return SYSINFO_RET_OK;
                     }
 
@@ -2350,18 +2361,19 @@ int     zbx_module_docker_cstatus(AGENT_REQUEST *request, AGENT_RESULT *result)
 
                     zabbix_log(LOG_LEVEL_DEBUG, "Count of containers in %s status: %d", state, count);
                     SET_UI64_RESULT(result, count);
-                    free((void*) answer);
+                    free(answer);
                     return SYSINFO_RET_OK;
                 } else {
                     if (strcmp(state, "All") == 0)
                     {
                         // All
-                        const char *answer = zbx_module_docker_socket_query("GET /containers/json?all=1 HTTP/1.0\r\n\n", 0);
+                        char *answer = zbx_module_docker_socket_query("GET /containers/json?all=1 HTTP/1.0\r\n\n", 0);
                         int count = 0;
                         if(strcmp(answer, "") == 0)
                         {
                             zabbix_log(LOG_LEVEL_DEBUG, "docker.cstatus is not available at the moment - some problem with Docker's socket API");
                             SET_MSG_RESULT(result, strdup("docker.cstatus is not available at the moment - some problem with Docker's socket API"));
+                            free(answer);
                             return SYSINFO_RET_FAIL;
                         }
                         if(strcmp(answer, "[]\n") != 0)
@@ -2371,7 +2383,7 @@ int     zbx_module_docker_cstatus(AGENT_REQUEST *request, AGENT_RESULT *result)
                             jp_data.end = &answer[strlen(answer)];
                             count = zbx_json_count(&jp_data);
                         }
-                        free((void*) answer);
+                        free(answer);
                         zabbix_log(LOG_LEVEL_DEBUG, "Count of containers in %s status: %d", state, count);
                         SET_UI64_RESULT(result, count);
                         return SYSINFO_RET_OK;
@@ -2380,18 +2392,19 @@ int     zbx_module_docker_cstatus(AGENT_REQUEST *request, AGENT_RESULT *result)
                         {
                             // Paused
                             // # Up
-                            const char *answer = zbx_module_docker_socket_query("GET /containers/json?all=0 HTTP/1.0\r\n\n", 0);
+                            char *answer = zbx_module_docker_socket_query("GET /containers/json?all=0 HTTP/1.0\r\n\n", 0);
                             if(strcmp(answer, "") == 0)
                             {
                                 zabbix_log(LOG_LEVEL_DEBUG, "docker.cstatus is not available at the moment - some problem with Docker's socket API");
                                 SET_MSG_RESULT(result, strdup("docker.cstatus is not available at the moment - some problem with Docker's socket API"));
+                                free(answer);
                                 return SYSINFO_RET_FAIL;
                             }
 
                             // empty reponse
                             if (strcmp(answer, "[]\n") == 0) {
                                SET_UI64_RESULT(result, 0);
-                               free((void*) answer);
+                               free(answer);
                                return SYSINFO_RET_OK;
                             }
 
@@ -2428,7 +2441,7 @@ int     zbx_module_docker_cstatus(AGENT_REQUEST *request, AGENT_RESULT *result)
                                 }
                             }
 
-                            free((void*) answer);
+                            free(answer);
                             zabbix_log(LOG_LEVEL_DEBUG, "Count of containers in %s status: %d", state, count);
                             SET_UI64_RESULT(result, count);
                             return SYSINFO_RET_OK;
@@ -2482,12 +2495,13 @@ int     zbx_module_docker_istatus(AGENT_REQUEST *request, AGENT_RESULT *result)
         if (strcmp(state, "All") == 0)
         {
             // All
-            const char *answer = zbx_module_docker_socket_query("GET /images/json?all=1&dangling=true HTTP/1.0\r\n\n", 0);
+            char *answer = zbx_module_docker_socket_query("GET /images/json?all=1&dangling=true HTTP/1.0\r\n\n", 0);
 
             if(strcmp(answer, "") == 0)
             {
                 zabbix_log(LOG_LEVEL_DEBUG, "docker.istatus is not available at the moment - some problem with Docker's socket API");
                 SET_MSG_RESULT(result, strdup("docker.istatus is not available at the moment - some problem with Docker's socket API"));
+                free(answer);
                 return SYSINFO_RET_FAIL;
             }
             if(strcmp(answer, "[]\n") != 0)
@@ -2496,17 +2510,18 @@ int     zbx_module_docker_istatus(AGENT_REQUEST *request, AGENT_RESULT *result)
                 jp_data.end = &answer[strlen(answer)];
                 count = zbx_json_count(&jp_data);
             }
-            free((void*) answer);
+            free(answer);
             zabbix_log(LOG_LEVEL_DEBUG, "Count of images in %s status: %d", state, count);
             SET_UI64_RESULT(result, count);
             return SYSINFO_RET_OK;
         } else if (strcmp(state, "Dangling") == 0) {
             // Dangling
-            const char *answer = zbx_module_docker_socket_query("GET /images/json?all=false&filters=%7B%22dangling%22%3A%5B%22true%22%5D%7D HTTP/1.0\r\n\n", 0);
+            char *answer = zbx_module_docker_socket_query("GET /images/json?all=false&filters=%7B%22dangling%22%3A%5B%22true%22%5D%7D HTTP/1.0\r\n\n", 0);
             if(strcmp(answer, "") == 0)
             {
                 zabbix_log(LOG_LEVEL_DEBUG, "docker.istatus is not available at the moment - some problem with Docker's socket API");
                 SET_MSG_RESULT(result, strdup("docker.istatus is not available at the moment - some problem with Docker's socket API"));
+                free(answer);
                 return SYSINFO_RET_FAIL;
             }
             if(strcmp(answer, "[]\n") != 0)
@@ -2515,7 +2530,7 @@ int     zbx_module_docker_istatus(AGENT_REQUEST *request, AGENT_RESULT *result)
                 jp_data.end = &answer[strlen(answer)];
                 count = zbx_json_count(&jp_data);
             }
-            free((void*) answer);
+            free(answer);
             zabbix_log(LOG_LEVEL_DEBUG, "Count of images in %s status: %d", state, count);
             SET_UI64_RESULT(result, count);
             return SYSINFO_RET_OK;
@@ -2561,11 +2576,12 @@ int     zbx_module_docker_vstatus(AGENT_REQUEST *request, AGENT_RESULT *result)
         if (strcmp(state, "All") == 0)
         {
             // All
-            const char *answer = zbx_module_docker_socket_query("GET /volumes HTTP/1.0\r\n\n", 0);
+            char *answer = zbx_module_docker_socket_query("GET /volumes HTTP/1.0\r\n\n", 0);
             if(strcmp(answer, "") == 0)
             {
                 zabbix_log(LOG_LEVEL_DEBUG, "docker.vstatus is not available at the moment - some problem with Docker's socket API");
                 SET_MSG_RESULT(result, strdup("docker.vstatus is not available at the moment - some problem with Docker's socket API"));
+                free(answer);
                 return SYSINFO_RET_FAIL;
             }
 
@@ -2573,6 +2589,7 @@ int     zbx_module_docker_vstatus(AGENT_REQUEST *request, AGENT_RESULT *result)
             {
                 zabbix_log(LOG_LEVEL_DEBUG, "docker.vstatus is not available for your Docker version");
                 SET_MSG_RESULT(result, strdup("docker.vstatus is not available for your Docker version"));
+                free(answer);
                 return SYSINFO_RET_FAIL;
             }
 
@@ -2583,12 +2600,12 @@ int     zbx_module_docker_vstatus(AGENT_REQUEST *request, AGENT_RESULT *result)
 
             if (SUCCEED == zbx_json_brackets_by_name(&jp_data, "Volumes", &jp_data2)) {
                 count = zbx_json_count(&jp_data2);
-                free((void*) answer);
+                free(answer);
                 zabbix_log(LOG_LEVEL_DEBUG, "Count of volumes in %s status: %d", state, count);
                 SET_UI64_RESULT(result, count);
                 return SYSINFO_RET_OK;
             } else {
-                free((void*) answer);
+                free(answer);
                 count = 0;
                 zabbix_log(LOG_LEVEL_DEBUG, "Count of volumes in %s status: %d", state, count);
                 SET_UI64_RESULT(result, count);
@@ -2596,11 +2613,12 @@ int     zbx_module_docker_vstatus(AGENT_REQUEST *request, AGENT_RESULT *result)
             }
         } else if (strcmp(state, "Dangling") == 0) {
             // Dangling
-            const char *answer = zbx_module_docker_socket_query("GET /volumes?filters=%7B%22dangling%22%3A%5B%22true%22%5D%7D HTTP/1.0\r\n\n", 0);
+            char *answer = zbx_module_docker_socket_query("GET /volumes?filters=%7B%22dangling%22%3A%5B%22true%22%5D%7D HTTP/1.0\r\n\n", 0);
             if(strcmp(answer, "") == 0)
             {
                 zabbix_log(LOG_LEVEL_DEBUG, "docker.vstatus is not available at the moment - some problem with Docker's socket API");
                 SET_MSG_RESULT(result, strdup("docker.vstatus is not available at the moment - some problem with Docker's socket API"));
+                free(answer);
                 return SYSINFO_RET_FAIL;
             }
 
@@ -2608,6 +2626,7 @@ int     zbx_module_docker_vstatus(AGENT_REQUEST *request, AGENT_RESULT *result)
             {
                 zabbix_log(LOG_LEVEL_DEBUG, "docker.vstatus is not available for your Docker version");
                 SET_MSG_RESULT(result, strdup("docker.vstatus is not available for your Docker version"));
+                free(answer);
                 return SYSINFO_RET_FAIL;
             }
 
@@ -2618,12 +2637,12 @@ int     zbx_module_docker_vstatus(AGENT_REQUEST *request, AGENT_RESULT *result)
 
             if (SUCCEED == zbx_json_brackets_by_name(&jp_data, "Volumes", &jp_data2)) {
                 count = zbx_json_count(&jp_data2);
-                free((void*) answer);
+                free(answer);
                 zabbix_log(LOG_LEVEL_DEBUG, "Count of volumes in %s status: %d", state, count);
                 SET_UI64_RESULT(result, count);
                 return SYSINFO_RET_OK;
             } else {
-                free((void*) answer);
+                free(answer);
                 count = 0;
                 zabbix_log(LOG_LEVEL_DEBUG, "Count of volumes in %s status: %d", state, count);
                 SET_UI64_RESULT(result, count);
