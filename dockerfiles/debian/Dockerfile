@@ -1,19 +1,17 @@
-# https://github.com/monitoringartist/zabbix-docker-monitoring
+# https://github.com/olivergregorius/zabbix-docker-monitoring
 
 # Define required Debian version by using FROM tag. Avalaible: wheezy/jessie/...
 FROM debian:stretch
 
-MAINTAINER "Jan Garaj" <info@monitoringartist.com>
-
-# Define required Zabbix version (<version>) or release (branches/<version>), e.g. 4.2.2, or release/4.2
-ENV ZABBIX_VERSION=release/4.2
+# Define required Zabbix version (<version>) or release (branches/<version>), e.g. release/4.4
+ENV ZABBIX_VERSION=release/4.4
 
 WORKDIR /root
 
 RUN \
    apt-get -qq update  1>/dev/null && \
    apt-get -qq --assume-yes install git automake autoconf gcc make pkg-config libpcre3-dev 1>/dev/null && \
-   git clone -q https://github.com/monitoringartist/zabbix-docker-monitoring
+   git clone -q https://github.com/olivergregorius/zabbix-docker-monitoring
 
 RUN \
    git clone -b ${ZABBIX_VERSION} --depth 1 https://github.com/zabbix/zabbix.git ~/zabbix && \
@@ -25,7 +23,7 @@ RUN \
    make
 
 ## Dockerized compilation (build from remote URL or local PATH):
-# docker build --rm=true -t local/zabbix-docker-module-compilation https://github.com/monitoringartist/zabbix-docker-monitoring.git#master:dockerfiles/debian/
+# docker build --rm=true -t local/zabbix-docker-module-compilation https://github.com/olivergregorius/zabbix-docker-monitoring.git#master:dockerfiles/debian/
 # docker build --rm=true -t local/zabbix-docker-module-compilation .
 # docker run  --rm -v /tmp:/tmp local/zabbix-docker-module-compilation cp /root/zabbix/src/modules/zabbix_module_docker/zabbix_module_docker.so /tmp/zabbix_module_docker.so
 # docker rmi -f local/zabbix-docker-module-compilation
