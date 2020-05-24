@@ -646,9 +646,9 @@ int zbx_module_docker_port_discovery(AGENT_REQUEST * request, AGENT_RESULT * res
 
   AGENT_REQUEST request2;
   init_request(&request2);
-  add_request_param(&request2, zbx_strdup(NULL, container, REQUEST_PARAMETER_TYPE_STRING));
-  add_request_param(&request2, zbx_strdup(NULL, "HostConfig", REQUEST_PARAMETER_TYPE_STRING));
-  add_request_param(&request2, zbx_strdup(NULL, "PortBindings", REQUEST_PARAMETER_TYPE_STRING));
+  add_request_param(&request2, zbx_strdup(NULL, container), REQUEST_PARAMETER_TYPE_STRING);
+  add_request_param(&request2, zbx_strdup(NULL, "HostConfig"), REQUEST_PARAMETER_TYPE_STRING);
+  add_request_param(&request2, zbx_strdup(NULL, "PortBindings"), REQUEST_PARAMETER_TYPE_STRING);
   struct inspect_result iresult;
   iresult = zbx_module_docker_inspect_exec(&request2);
   free_request(&request2);
@@ -746,7 +746,7 @@ char*  zbx_module_docker_get_fci(char *fci)
         zabbix_log(LOG_LEVEL_DEBUG, "Translating container name to fci by using docker.inspect");
         AGENT_REQUEST	request;
         init_request(&request);
-        add_request_param(&request, zbx_strdup(NULL, fci, REQUEST_PARAMETER_TYPE_STRING));
+        add_request_param(&request, zbx_strdup(NULL, fci), REQUEST_PARAMETER_TYPE_STRING);
         add_request_param(&request, zbx_strdup(NULL, "Id"), REQUEST_PARAMETER_TYPE_STRING);
         // TODO dynamic iresult
         struct inspect_result iresult;
