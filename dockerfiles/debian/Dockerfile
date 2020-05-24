@@ -11,7 +11,7 @@ WORKDIR /root
 RUN \
    apt-get -qq update  1>/dev/null && \
    apt-get -qq --assume-yes install git automake autoconf gcc make pkg-config libpcre3-dev 1>/dev/null && \
-   git clone -q https://github.com/olivergregorius/zabbix-docker-monitoring
+   git clone -q https://github.com/realhidden/zabbix-docker-monitoring
 
 RUN \
    git clone -b ${ZABBIX_VERSION} --depth 1 https://github.com/zabbix/zabbix.git ~/zabbix && \
