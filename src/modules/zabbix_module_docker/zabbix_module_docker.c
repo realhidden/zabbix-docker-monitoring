@@ -308,14 +308,12 @@ int zbx_docker_api_detect()
             {
                 zabbix_log(LOG_LEVEL_DEBUG, "Docker's socket works - extended docker metrics are available");
                 socket_api = 1;
-                free(echo);
-                return socket_api;
             } else {
                 zabbix_log(LOG_LEVEL_DEBUG, "Docker's socket doesn't work - only basic docker metrics are available");
                 socket_api = 0;
-                free(echo);
-                return socket_api;
             }
+            free(echo);
+            return socket_api;
         }
 }
 
@@ -785,7 +783,7 @@ int     zbx_docker_dir_detect()
             "libvirt/lxc/",   // Legacy libvirt-lxc
             // TODO pos = cgroup.find("-lxc\\x2");     // Systemd libvirt-lxc
             // TODO pos = cgroup.find(".libvirt-lxc"); // Non-systemd libvirt-lxc
-            ""
+            NULL
         }, **tdriver;
         char path[512];
         const char *mounts_regex = "^[^[:blank:]]+[[:blank:]]+(/[^[:blank:]]+/)[^[:blank:]]+[[:blank:]]+cgroup[[:blank:]]+.*$";
@@ -814,7 +812,7 @@ int     zbx_docker_dir_detect()
                 tdriver = drivers;
                 size_t  ddir_size;
                 char    *ddir;
-                while (*tdriver != "")
+                while (*tdriver != NULL)
                 {
                     ddir_size = strlen(cgroup) + strlen(stat_dir) + strlen(*tdriver) + 1;
                     ddir = malloc(ddir_size);
@@ -851,7 +849,7 @@ int     zbx_docker_dir_detect()
                         free(ddir);
                         return SYSINFO_RET_OK;
                     }
-                    *tdriver++;
+                    tdriver++;
                     free(ddir);
                 }
                 driver = "";
