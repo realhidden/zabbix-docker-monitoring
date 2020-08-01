@@ -154,11 +154,11 @@ char*  zbx_module_docker_socket_query(char *query, int stream)
         int sock, nbytes;
         size_t addr_length;
         char buffer[buffer_size+1];
-        char *response_substr, *response, *empty="", *message = NULL, *temp1, *temp2;
+        char *response_substr, *response, *message = NULL, *temp1, *temp2;
         if ((sock = socket(PF_UNIX, SOCK_STREAM, 0)) < 0)
         {
             zabbix_log(LOG_LEVEL_WARNING, "Cannot create socket for docker's communication");
-            return empty;
+            return zbx_strdup(NULL, "");
         }
         address.sun_family = AF_UNIX;
         zbx_strlcpy(address.sun_path, "/var/run/docker.sock", strlen("/var/run/docker.sock")+1);
@@ -166,7 +166,7 @@ char*  zbx_module_docker_socket_query(char *query, int stream)
         if (connect(sock, (struct sockaddr *) &address, addr_length))
         {
             zabbix_log(LOG_LEVEL_WARNING, "Cannot connect to standard docker's socket /var/run/docker.sock");
-            return empty;
+            return zbx_strdup(NULL, "");
         }
 
         // socket input/output timeout
@@ -179,17 +179,19 @@ char*  zbx_module_docker_socket_query(char *query, int stream)
             zabbix_log(LOG_LEVEL_WARNING, "Cannot set SO_SNDTIMEO socket timeout: %ld seconds", stimeout.tv_sec);
         }
 
+        /*
         temp1 = string_replace(query, "\n", "");
         temp2 = string_replace(temp1, "\r", "");
         free(temp1);
         zabbix_log(LOG_LEVEL_DEBUG, "Docker's socket query: %s", temp2);
         free(temp2);
+        */
         write(sock, query, strlen(query));
         message = realloc(NULL, 1);
         if (message == NULL)
         {
             zabbix_log(LOG_LEVEL_WARNING, "Problem with allocating memory for Docker answer");
-            return empty;
+            return zbx_strdup(NULL, "");
         }
         strcat(message, "");
         while ((nbytes = read(sock, buffer, buffer_size)) > 0 )
@@ -199,7 +201,7 @@ char*  zbx_module_docker_socket_query(char *query, int stream)
             if (message == NULL)
             {
                 zabbix_log(LOG_LEVEL_WARNING, "Problem with allocating memory");
-                return empty;
+                return zbx_strdup(NULL, "");
             }
             strcat(message, buffer);
             // wait only for first chunk of (stats) stream
@@ -225,11 +227,13 @@ char*  zbx_module_docker_socket_query(char *query, int stream)
         }
         free(message);
 
+        /*
         temp1 = string_replace(response, "\n", "");
         temp2 = string_replace(temp1, "\r", "");
         free(temp1);
         zabbix_log(LOG_LEVEL_DEBUG, "Docker's socket response: %s", temp2);
         free(temp2);
+        */
         return response;
 }
 
